@@ -452,3 +452,7 @@ async function start() {
 }
 
 start();
+
+// Keep-alive server
+const http = require('http');
+http.createServer((req,res)=>{res.writeHead(200);res.end('OK');}).listen(process.env.PORT||3000);
