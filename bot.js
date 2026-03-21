@@ -353,6 +353,18 @@ async function checkAndTrade() {
         state.position = 'none';
         return;
       }
+
+      // Minimum move filter — require 1.5% gain to cover fees (0.52%) + profit
+      const lastBuyPrice = [...state.trades].reverse().find(t=>t.type==='BUY')?.price;
+      const currentPrice = await getPrice();
+      if(lastBuyPrice){
+        const movePct = ((currentPrice - lastBuyPrice) / lastBuyPrice) * 100;
+        if(movePct < 1.5){
+          log(`Skip SELL — move only ${movePct.toFixed(2)}% (min 1.5% required to cover fees)`);
+          return;
+        }
+      }
+
       const order = await placeMarketSell(bal.hype);
       state.position = 'none';
       state.signalCount = 0;
