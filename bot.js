@@ -14,9 +14,11 @@ const CONFIG = {
   TELEGRAM_TOKEN:process.env.TELEGRAM_TOKEN    || '',
   TELEGRAM_CHAT: process.env.TELEGRAM_CHAT_ID  || '',
   PAIR:          'HYPEUSD',
-  MIN_ORDER_USD: 5,       // min USD to trade (Kraken minimum)
-  CHECK_INTERVAL:60000,   // check every 60 seconds
-  SIGNAL_CONFIRM:2,       // require same signal N times before trading
+  MIN_ORDER_USD: 5,        // min USD to trade (Kraken minimum)
+  CHECK_INTERVAL:60000,    // check every 60 seconds
+  SIGNAL_CONFIRM:2,        // require same signal N times before trading
+  MIN_PROFIT_PCT: 2.0,     // minimum % gain to sell (covers fees + profit)
+  ENTRY_PRICE:   parseFloat(process.env.ENTRY_PRICE || '0'), // set this env var to your buy price
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -333,6 +335,7 @@ async function checkAndTrade() {
 
       const trade = { type:'BUY', price: order.price, volume: order.volume, time: new Date().toISOString(), usdSpent: useUsd };
       state.trades.push(trade);
+      state.entryPrice = order.price; // persist entry price in memory
 
       const msg = `🟢 <b>HYPE BOT — COMPRA</b>\n\n` +
         `💰 Precio: <b>$${order.price.toFixed(2)}</b>\n` +
@@ -354,15 +357,19 @@ async function checkAndTrade() {
         return;
       }
 
-      // Minimum move filter — require 1.5% gain to cover fees (0.52%) + profit
-      const lastBuyPrice = [...state.trades].reverse().find(t=>t.type==='BUY')?.price;
+      // Minimum move filter — require MIN_PROFIT_PCT gain to cover fees + profit
+      // Uses last buy from trades history, falls back to ENTRY_PRICE env var
+      const lastBuyPrice = [...state.trades].reverse().find(t=>t.type==='BUY')?.price
+                        || state.entryPrice
+                        || CONFIG.ENTRY_PRICE;
       const currentPrice = await getPrice();
-      if(lastBuyPrice){
+      if(lastBuyPrice && lastBuyPrice > 0){
         const movePct = ((currentPrice - lastBuyPrice) / lastBuyPrice) * 100;
-        if(movePct < 1.5){
-          log(`Skip SELL — move only ${movePct.toFixed(2)}% (min 1.5% required to cover fees)`);
+        if(movePct < CONFIG.MIN_PROFIT_PCT){
+          log(`Skip SELL — move only ${movePct.toFixed(2)}% (min ${CONFIG.MIN_PROFIT_PCT}% required)`);
           return;
         }
+        log(`SELL approved — move ${movePct.toFixed(2)}% >= ${CONFIG.MIN_PROFIT_PCT}%`);
       }
 
       const order = await placeMarketSell(bal.hype);
@@ -438,7 +445,19 @@ async function start() {
   try {
     const bal = await getBalances();
     log(`Initial balances — HYPE: ${bal.hype}, USD: $${bal.usd}`);
-    if(bal.hype > 0) state.position = 'long';
+    if(bal.hype > 0){
+      state.position = 'long';
+      // Use ENTRY_PRICE env var if set, otherwise fetch current price as reference
+      if(CONFIG.ENTRY_PRICE > 0){
+        state.entryPrice = CONFIG.ENTRY_PRICE;
+        log(`Entry price set from env: $${state.entryPrice}`);
+      } else {
+        const p = await getPrice();
+        state.entryPrice = p;
+        log(`Entry price set to current: $${state.entryPrice} (set ENTRY_PRICE env var for accuracy)`);
+      }
+    }
+    await telegram(`🤖 <b>Bot reiniciado</b>\nHYPE: ${bal.hype.toFixed(4)} @ entrada $${state.entryPrice}\nVenta cuando suba ${CONFIG.MIN_PROFIT_PCT}% → $${(state.entryPrice*(1+CONFIG.MIN_PROFIT_PCT/100)).toFixed(2)}`);
   } catch(e) {
     log('Balance check failed: '+e.message);
   }
@@ -450,5 +469,22 @@ async function start() {
   // Status every hour
   setInterval(sendStatus, 60*60*1000);
 }
+
+// ── Keep-alive HTTP server (prevents Render free tier from sleeping) ──────────
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end(JSON.stringify({
+    status: 'running',
+    position: state.position,
+    hype: state.hypeBalance,
+    usd: state.usdBalance,
+    trades: state.trades.length,
+    pnl: state.totalPnl.toFixed(2),
+    uptime: Math.floor((Date.now()-state.startTime)/1000/60)+'min'
+  }));
+}).listen(PORT, () => log(`Keep-alive server on port ${PORT}`));
 
 start();
