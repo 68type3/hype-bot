@@ -18,6 +18,8 @@ const CONFIG = {
   CHECK_INTERVAL:60000,    // check every 60 seconds
   SIGNAL_CONFIRM:2,        // require same signal N times before trading
   MIN_PROFIT_PCT: 2.0,     // minimum % gain to sell (covers fees + profit)
+  STOP_LOSS_PCT: -5.0,     // stop loss: sell if drops 5% from entry
+  DCA_RSI:       25,       // buy more if RSI drops below this (extreme oversold)
   ENTRY_PRICE:   parseFloat(process.env.ENTRY_PRICE || '0'), // set this env var to your buy price
 };
 
@@ -320,6 +322,41 @@ async function checkAndTrade() {
     // Get current balances
     const bal = await getBalances();
     log(`Balances — HYPE: ${bal.hype.toFixed(4)}, USD: $${bal.usd.toFixed(2)}`);
+
+    // ── STOP LOSS — sell if price drops 5% from entry ──
+    if(state.position === 'long' && bal.hype > 0.001){
+      const entryRef = [...state.trades].reverse().find(t=>t.type==='BUY')?.price
+                    || state.entryPrice || CONFIG.ENTRY_PRICE;
+      if(entryRef > 0){
+        const currentPrice = closes[closes.length-1];
+        const dropPct = ((currentPrice - entryRef) / entryRef) * 100;
+        if(dropPct <= CONFIG.STOP_LOSS_PCT){
+          log(`🛑 STOP LOSS triggered — drop ${dropPct.toFixed(2)}% from $${entryRef}`);
+          const order = await placeMarketSell(bal.hype);
+          state.position = 'none'; state.signalCount = 0;
+          const pnl = (order.price - entryRef) * order.volume;
+          state.totalPnl += pnl;
+          state.trades.push({type:'SELL',price:order.price,volume:order.volume,time:new Date().toISOString(),pnl,stopLoss:true});
+          await telegram(`🛑 <b>STOP LOSS EJECUTADO</b>\n\n💰 Precio: <b>$${order.price.toFixed(2)}</b>\n📦 ${order.volume} HYPE vendido\n📉 Pérdida: <b>$${pnl.toFixed(2)} (${dropPct.toFixed(1)}%)</b>\n🛡 Capital protegido — esperando rebote`);
+          return;
+        }
+      }
+    }
+
+    // ── DCA BUY — buy more if RSI extreme oversold and have USD ──
+    if(rsi <= CONFIG.DCA_RSI && bal.usd >= CONFIG.MIN_ORDER_USD){
+      const useUsd = bal.usd * 0.99;
+      log(`📉 DCA triggered — RSI ${rsi} extreme oversold, buying with $${useUsd.toFixed(2)}`);
+      const order = await placeMarketBuy(useUsd);
+      // Average down entry price
+      const oldEntry = state.entryPrice || CONFIG.ENTRY_PRICE || order.price;
+      const totalHype = bal.hype + order.volume;
+      state.entryPrice = ((oldEntry * bal.hype) + (order.price * order.volume)) / totalHype;
+      state.position = 'long'; state.signalCount = 0;
+      state.trades.push({type:'BUY',price:order.price,volume:order.volume,time:new Date().toISOString(),usdSpent:useUsd,dca:true});
+      await telegram(`📉 <b>DCA COMPRA — RSI ${rsi}</b>\n\n💰 Precio: <b>$${order.price.toFixed(2)}</b>\n📦 +${order.volume} HYPE\n📊 Nuevo precio promedio: <b>$${state.entryPrice.toFixed(2)}</b>\n💵 USD usado: $${useUsd.toFixed(2)}`);
+      return;
+    }
 
     // ── BUY signal ──
     if(action === 'COMPRAR' && state.position !== 'long') {
